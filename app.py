@@ -1,13 +1,11 @@
 """
-Retail Store Daily Revenue Analysis
-Supports: CSV (.csv) and Excel (.xlsx, .xls) data sources
-Enhanced with interactive Plotly visual analytics:
-- Daily revenue trend with 7-day moving average and peak/low annotations
-- Cumulative running revenue curve
-- Day-over-Day (DoD) % growth rate (positive/negative colored bars)
-- Day-of-Week performance & Weekend vs Weekday contribution donut chart
-- Revenue distribution histogram and performance tier brackets
-- Full dataset viewer with CSV export
+Retail Store Daily Revenue & Multi-Dimensional Analytics Dashboard
+Supports:
+- Single & multi-column CSV (.csv) and Excel (.xlsx, .xls) files
+- Dynamic column mapping for Date and Metric/Revenue headers
+- Automatic multi-column categorical filters (Category, Store, Payment Method, etc.)
+- Multi-dimensional breakdown charts & visualizations
+- Comprehensive daily trends, moving averages, and cumulative curves
 """
 import streamlit as st
 import pandas as pd
@@ -17,332 +15,506 @@ import os
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Retail Revenue Analytics Dashboard",
+    page_title="Retail Revenue & Sales Analytics",
     page_icon="🛍️",
     layout="wide"
 )
 
 st.title("🛍️ Retail Store Daily Revenue Analytics")
-st.markdown("Deep-dive revenue performance, growth trajectories, weekly seasonality, and sales distributions.")
+st.markdown("Multi-dimensional retail performance analysis with customizable column mapping, categorical slicing, and trend forecasting.")
 
 # --- Sidebar: Data Loading ---
 st.sidebar.header("📁 Data Source")
 uploaded_file = st.sidebar.file_uploader(
     "Upload CSV or Excel file",
     type=["csv", "xlsx", "xls"],
-    help="Upload a dataset containing 'Date' and 'Revenue' columns."
+    help="Upload any retail dataset (CSV or Excel) with at least a Date and a Numeric/Sales column."
 )
 
 @st.cache_data
-def load_data(file_source):
+def load_raw_data(file_source):
+    """Loads CSV or Excel data while preserving all columns."""
     if isinstance(file_source, str):
-        df = pd.read_csv(file_source)
+        if file_source.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(file_source)
+        else:
+            df = pd.read_csv(file_source)
     else:
         file_name = file_source.name.lower()
         if file_name.endswith((".xlsx", ".xls")):
             df = pd.read_excel(file_source)
         else:
             df = pd.read_csv(file_source)
-    
-    # Standardize column names (strip whitespace)
+            
+    # Clean whitespace in column names
     df.columns = [str(c).strip() for c in df.columns]
-    
-    # Find matching Date and Revenue columns regardless of casing
-    col_mapping = {}
-    for col in df.columns:
-        if col.lower() == "date":
-            col_mapping[col] = "Date"
-        elif col.lower() == "revenue":
-            col_mapping[col] = "Revenue"
-    df = df.rename(columns=col_mapping)
-    
-    if "Date" not in df.columns or "Revenue" not in df.columns:
-        return None, "File must contain 'Date' and 'Revenue' columns."
-    
-    # Clean data types
-    df = df.dropna(subset=["Date", "Revenue"])
-    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-    df["Revenue"] = pd.to_numeric(df["Revenue"].astype(str).str.replace(r"[^\d.]", "", regex=True), errors="coerce")
-    df = df.dropna(subset=["Date", "Revenue"])
-    df = df.sort_values("Date").reset_index(drop=True)
-    
-    # Derived analytical columns
-    df["Day_Name"] = df["Date"].dt.day_name()
-    df["Is_Weekend"] = df["Date"].dt.dayofweek.isin([5, 6]).map({True: "Weekend", False: "Weekday"})
-    df["DoD_Change_Pct"] = df["Revenue"].pct_change() * 100
-    df["Cumulative_Revenue"] = df["Revenue"].cumsum()
-    df["7_Day_MA"] = df["Revenue"].rolling(window=7, min_periods=1).mean()
-    
-    return df, None
+    return df
 
-# Load uploaded file or fallback to default CSV
-default_file = "Revenue_analysis.csv"
+# Determine data source
+raw_df = None
+source_name = ""
+
 if uploaded_file is not None:
-    df, error = load_data(uploaded_file)
-    if error:
-        st.error(error)
+    try:
+        raw_df = load_raw_data(uploaded_file)
+        source_name = uploaded_file.name
+        st.sidebar.success(f"Loaded: `{source_name}` ({len(raw_df)} rows, {len(raw_df.columns)} columns)")
+    except Exception as e:
+        st.sidebar.error(f"Error loading file: {e}")
         st.stop()
-    st.sidebar.success(f"Loaded: `{uploaded_file.name}`")
-elif os.path.exists(default_file):
-    df, error = load_data(default_file)
-    if error:
-        st.error(error)
-        st.stop()
-    st.sidebar.info(f"Using default data: `{default_file}`")
 else:
-    st.warning("⚠️ No data source found. Please upload a CSV or Excel file.")
+    # Check for default files
+    sample_files = []
+    if os.path.exists("multi_column_retail_sample.xlsx"):
+        sample_files.append("multi_column_retail_sample.xlsx")
+    if os.path.exists("Revenue_analysis.csv"):
+        sample_files.append("Revenue_analysis.csv")
+    if os.path.exists("sample_revenue.xlsx"):
+        sample_files.append("sample_revenue.xlsx")
+        
+    if sample_files:
+        chosen_sample = st.sidebar.selectbox("Or choose a sample dataset:", sample_files)
+        raw_df = load_raw_data(chosen_sample)
+        source_name = chosen_sample
+        st.sidebar.info(f"Using: `{chosen_sample}` ({len(raw_df)} rows, {len(raw_df.columns)} columns)")
+    else:
+        st.warning("⚠️ No dataset found. Please upload a CSV or Excel file.")
+        st.stop()
+
+if raw_df is None or raw_df.empty:
+    st.error("The selected dataset is empty.")
     st.stop()
+
+all_columns = list(raw_df.columns)
+
+# --- Sidebar: Dynamic Column Mapping ---
+st.sidebar.header("⚙️ Column Mapping")
+
+# Heuristic auto-detection for Date column
+date_candidates = [
+    col for col in all_columns
+    if any(k in col.lower() for k in ["date", "day", "time", "order_date", "trans_date", "dt"])
+]
+default_date_idx = all_columns.index(date_candidates[0]) if date_candidates else 0
+
+selected_date_col = st.sidebar.selectbox(
+    "Select Date Column 📅",
+    options=all_columns,
+    index=default_date_idx,
+    help="Select the column representing transaction or sales dates."
+)
+
+# Heuristic auto-detection for Revenue/Value column
+numeric_candidates = [
+    col for col in all_columns
+    if col != selected_date_col and any(
+        k in col.lower() for k in ["revenue", "sales", "amount", "total", "price", "turnover", "inr", "value", "units"]
+    )
+]
+if not numeric_candidates:
+    # Fallback to any column other than the date column
+    numeric_candidates = [c for c in all_columns if c != selected_date_col]
+
+default_metric_idx = all_columns.index(numeric_candidates[0]) if numeric_candidates else (1 if len(all_columns) > 1 else 0)
+
+selected_metric_col = st.sidebar.selectbox(
+    "Select Metric / Revenue Column 💰",
+    options=[c for c in all_columns if c != selected_date_col],
+    index=min(default_metric_idx, len(all_columns) - 2) if len(all_columns) > 1 else 0,
+    help="Select the numeric column to analyze (e.g., Revenue, Sales, Profit, Units Sold)."
+)
+
+# --- Clean & Parse Data ---
+df = raw_df.copy()
+
+# Parse Date
+df["Parsed_Date"] = pd.to_datetime(df[selected_date_col], format="mixed", dayfirst=True, errors="coerce")
+# Parse Metric
+df["Clean_Metric"] = pd.to_numeric(
+    df[selected_metric_col].astype(str).str.replace(r"[^\d.-]", "", regex=True),
+    errors="coerce"
+)
+
+# Drop invalid dates/metrics
+df = df.dropna(subset=["Parsed_Date", "Clean_Metric"]).copy()
+if df.empty:
+    st.error("No valid numeric data found for the selected Date and Metric columns.")
+    st.stop()
+
+df = df.sort_values("Parsed_Date").reset_index(drop=True)
+df["Day_Name"] = df["Parsed_Date"].dt.day_name()
+df["Is_Weekend"] = df["Parsed_Date"].dt.dayofweek.isin([5, 6]).map({True: "Weekend", False: "Weekday"})
+
+# --- Sidebar: Dynamic Categorical Filters ---
+# Identify non-Date, non-Metric columns that can serve as dimensions (<= 50 unique values)
+categorical_cols = [
+    col for col in all_columns
+    if col not in [selected_date_col, selected_metric_col]
+    and df[col].nunique() <= 50
+    and df[col].nunique() > 1
+]
+
+if categorical_cols:
+    st.sidebar.header("🔍 Dimension Filters")
+    for cat_col in categorical_cols:
+        # Strip string whitespace
+        if df[cat_col].dtype == object or isinstance(df[cat_col].dtype, pd.StringDtype):
+            df[cat_col] = df[cat_col].astype(str).str.strip()
+        
+        unique_options = sorted([str(v) for v in df[cat_col].dropna().unique()])
+        selected_options = st.sidebar.multiselect(
+            f"Filter {cat_col}",
+            options=unique_options,
+            default=unique_options,
+            help=f"Select values to include for {cat_col}"
+        )
+        if selected_options:
+            df = df[df[cat_col].astype(str).isin(selected_options)]
+        else:
+            df = df.iloc[0:0]
 
 # --- Sidebar: Date Range Filter ---
-min_date = df["Date"].min().date()
-max_date = df["Date"].max().date()
+st.sidebar.header("🗓️ Date Filter")
+if not df.empty:
+    min_date = df["Parsed_Date"].min().date()
+    max_date = df["Parsed_Date"].max().date()
 
-st.sidebar.header("🔍 Filters")
-if min_date != max_date:
-    selected_range = st.sidebar.date_input(
-        "Select Date Range",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
-    if isinstance(selected_range, (tuple, list)) and len(selected_range) == 2:
-        start_date, end_date = selected_range
-        df = df[(df["Date"].dt.date >= start_date) & (df["Date"].dt.date <= end_date)].copy()
-        # Recalculate cumulative revenue on filtered subset
-        df["Cumulative_Revenue"] = df["Revenue"].cumsum()
-        df["DoD_Change_Pct"] = df["Revenue"].pct_change() * 100
-        df["7_Day_MA"] = df["Revenue"].rolling(window=7, min_periods=1).mean()
-else:
-    st.sidebar.caption(f"Single date available: {min_date}")
+    if min_date != max_date:
+        selected_range = st.sidebar.date_input(
+            "Select Date Range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date
+        )
+        if isinstance(selected_range, (tuple, list)) and len(selected_range) == 2:
+            start_date, end_date = selected_range
+            df = df[(df["Parsed_Date"].dt.date >= start_date) & (df["Parsed_Date"].dt.date <= end_date)].copy()
+    else:
+        st.sidebar.caption(f"Single date available: {min_date}")
 
 if df.empty:
-    st.warning("No data found for the selected date range.")
+    st.warning("⚠️ No records match the selected filters. Please adjust your selections in the sidebar.")
     st.stop()
 
-# --- Metrics Calculations ---
-total_revenue = df["Revenue"].sum()
-average_revenue = df["Revenue"].mean()
-maximum_revenue = df["Revenue"].max()
-minimum_revenue = df["Revenue"].min()
+# --- Daily Aggregated Data ---
+# If multiple rows exist on the same date, group by date for trends
+daily_df = (
+    df.groupby("Parsed_Date", as_index=False)["Clean_Metric"]
+    .sum()
+    .rename(columns={"Clean_Metric": "Daily_Total"})
+    .sort_values("Parsed_Date")
+    .reset_index(drop=True)
+)
+daily_df["DoD_Change_Pct"] = daily_df["Daily_Total"].pct_change() * 100
+daily_df["Cumulative_Total"] = daily_df["Daily_Total"].cumsum()
+daily_df["7_Day_MA"] = daily_df["Daily_Total"].rolling(window=7, min_periods=1).mean()
+daily_df["Day_Name"] = daily_df["Parsed_Date"].dt.day_name()
+daily_df["Is_Weekend"] = daily_df["Parsed_Date"].dt.dayofweek.isin([5, 6]).map({True: "Weekend", False: "Weekday"})
 
-peak_row = df.loc[df["Revenue"].idxmax()]
-peak_date = peak_row["Date"].strftime("%d-%m-%Y")
+# --- Metric Calculations ---
+total_value = df["Clean_Metric"].sum()
+total_records = len(df)
+total_days = len(daily_df)
+avg_daily_value = daily_df["Daily_Total"].mean()
+max_daily_row = daily_df.loc[daily_df["Daily_Total"].idxmax()]
+min_daily_row = daily_df.loc[daily_df["Daily_Total"].idxmin()]
 
-lowest_row = df.loc[df["Revenue"].idxmin()]
-lowest_date = lowest_row["Date"].strftime("%d-%m-%Y")
+peak_date_str = max_daily_row["Parsed_Date"].strftime("%d-%m-%Y")
+low_date_str = min_daily_row["Parsed_Date"].strftime("%d-%m-%Y")
 
-# Console Output
-print("---------- Date-wise Retail Revenue Analysis -----------")
-print(f"Total Revenue   : ₹{total_revenue:,.2f}")
-print(f"Average Revenue : ₹{average_revenue:,.2f}")
-print(f"Maximum Revenue : ₹{maximum_revenue:,.2f} on {peak_date}")
-print(f"Minimum Revenue : ₹{minimum_revenue:,.2f} on {lowest_date}")
+# Metric formatting helper
+is_currency = any(k in selected_metric_col.lower() for k in ["revenue", "sales", "amount", "total", "price", "turnover", "inr"])
+metric_symbol = "₹" if is_currency else ""
 
-# --- KPI Cards ---
+# --- Key Metric Display Cards ---
 st.subheader("📊 Key Performance Indicators")
-col1, col2, col3, col4, col5 = st.columns(5)
+kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
-col1.metric("💰 Total Revenue", f"₹{total_revenue:,.2f}")
-col2.metric("📈 Daily Average", f"₹{average_revenue:,.2f}")
-col3.metric("🏆 Peak Revenue", f"₹{maximum_revenue:,.2f}", help=f"Peak on {peak_date}")
-col4.metric("📉 Lowest Revenue", f"₹{minimum_revenue:,.2f}", help=f"Lowest on {lowest_date}")
-col5.metric("🗓️ Days Analyzed", f"{len(df)} days")
+kpi1.metric(f"💰 Total {selected_metric_col}", f"{metric_symbol}{total_value:,.2f}")
+kpi2.metric(f"📈 Daily Average", f"{metric_symbol}{avg_daily_value:,.2f}")
+kpi3.metric(f"🏆 Peak Day", f"{metric_symbol}{max_daily_row['Daily_Total']:,.2f}", help=f"Occurred on {peak_date_str}")
+kpi4.metric(f"📉 Lowest Day", f"{metric_symbol}{min_daily_row['Daily_Total']:,.2f}", help=f"Occurred on {low_date_str}")
+kpi5.metric("🗓️ Days Analyzed", f"{total_days} days", delta=f"{total_records} transactions" if total_records != total_days else None)
 
 st.markdown("---")
 
-# --- Tabs for Rich Visualizations ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📈 Revenue Trends",
-    "🚀 Growth & Cumulative",
-    "📅 Day-of-Week & Weekends",
-    "📊 Revenue Distribution",
-    "📋 Data & Export"
-])
+# --- Interactive Tabs ---
+tab_titles = ["📈 Daily Trends", "🚀 Growth & Cumulative", "📅 Day-of-Week"]
+if categorical_cols:
+    tab_titles.append("🏷️ Category Breakdown")
+tab_titles.extend(["📊 Distribution & Tiers", "📋 Filtered Data & Export"])
 
-# ================= TAB 1: REVENUE TRENDS =================
-with tab1:
-    st.subheader("📈 Daily Revenue & Moving Average Trend")
-    show_ma = st.toggle("Show 7-Day Moving Average", value=True)
+tabs = st.tabs(tab_titles)
+tab_idx = 0
 
-    fig_trend = go.Figure()
+# ================= TAB 1: DAILY TRENDS =================
+with tabs[tab_idx]:
+    tab_idx += 1
+    st.subheader(f"📈 Daily {selected_metric_col} Trend & Moving Average")
+    
+    col_t1, col_t2 = st.columns([3, 1])
+    with col_t2:
+        show_ma = st.toggle("7-Day Moving Average", value=True)
+        slice_by_dim = "None"
+        if categorical_cols:
+            slice_by_dim = st.selectbox("Split Lines by Dimension:", ["None"] + categorical_cols)
+    
+    with col_t1:
+        if slice_by_dim != "None":
+            # Multi-line trend split by category
+            dim_trend_df = (
+                df.groupby(["Parsed_Date", slice_by_dim])["Clean_Metric"]
+                .sum()
+                .reset_index()
+            )
+            fig_trend = px.line(
+                dim_trend_df,
+                x="Parsed_Date",
+                y="Clean_Metric",
+                color=slice_by_dim,
+                markers=True,
+                title=f"Daily {selected_metric_col} by {slice_by_dim}",
+                labels={"Parsed_Date": "Date", "Clean_Metric": selected_metric_col}
+            )
+            fig_trend.update_traces(
+                hovertemplate=f"<b>Date:</b> %{{x|%d %b %Y}}<br><b>{slice_by_dim}:</b> %{{data.name}}<br><b>Value:</b> {metric_symbol}%{{y:,.2f}}<extra></extra>"
+            )
+        else:
+            fig_trend = go.Figure()
+            # Daily total line
+            fig_trend.add_trace(go.Scatter(
+                x=daily_df["Parsed_Date"],
+                y=daily_df["Daily_Total"],
+                mode="lines+markers",
+                name="Daily Total",
+                line=dict(color="#1f77b4", width=2.5),
+                marker=dict(size=7, color="#1f77b4"),
+                hovertemplate=f"<b>Date:</b> %{{x|%d %b %Y}}<br><b>Total:</b> {metric_symbol}%{{y:,.2f}}<extra></extra>"
+            ))
+            # Moving average line
+            if show_ma:
+                fig_trend.add_trace(go.Scatter(
+                    x=daily_df["Parsed_Date"],
+                    y=daily_df["7_Day_MA"],
+                    mode="lines",
+                    name="7-Day Moving Avg",
+                    line=dict(color="#ff7f0e", width=2.5, dash="dash"),
+                    hovertemplate=f"<b>Date:</b> %{{x|%d %b %Y}}<br><b>7-Day Avg:</b> {metric_symbol}%{{y:,.2f}}<extra></extra>"
+                ))
+            # Peak and low pins
+            fig_trend.add_trace(go.Scatter(
+                x=[max_daily_row["Parsed_Date"]],
+                y=[max_daily_row["Daily_Total"]],
+                mode="markers+text",
+                name="Peak Day",
+                text=[f"Peak: {metric_symbol}{max_daily_row['Daily_Total']:,.0f}"],
+                textposition="top center",
+                marker=dict(color="#2ca02c", size=14, symbol="star")
+            ))
+            fig_trend.add_trace(go.Scatter(
+                x=[min_daily_row["Parsed_Date"]],
+                y=[min_daily_row["Daily_Total"]],
+                mode="markers+text",
+                name="Lowest Day",
+                text=[f"Low: {metric_symbol}{min_daily_row['Daily_Total']:,.0f}"],
+                textposition="bottom center",
+                marker=dict(color="#d62728", size=12, symbol="triangle-down")
+            ))
 
-    # Daily Revenue Line & Points
-    fig_trend.add_trace(go.Scatter(
-        x=df["Date"],
-        y=df["Revenue"],
-        mode="lines+markers",
-        name="Daily Revenue",
-        line=dict(color="#1f77b4", width=2.5),
-        marker=dict(size=7, color="#1f77b4"),
-        hovertemplate="<b>Date:</b> %{x|%d %b %Y}<br><b>Revenue:</b> ₹%{y:,.2f}<extra></extra>"
-    ))
-
-    # 7-Day Moving Average Line
-    if show_ma:
-        fig_trend.add_trace(go.Scatter(
-            x=df["Date"],
-            y=df["7_Day_MA"],
-            mode="lines",
-            name="7-Day Moving Avg",
-            line=dict(color="#ff7f0e", width=2.5, dash="dash"),
-            hovertemplate="<b>Date:</b> %{x|%d %b %Y}<br><b>7-Day Avg:</b> ₹%{y:,.2f}<extra></extra>"
-        ))
-
-    # Peak and Lowest Highlights
-    fig_trend.add_trace(go.Scatter(
-        x=[peak_row["Date"]],
-        y=[maximum_revenue],
-        mode="markers+text",
-        name="Peak Sales Day",
-        text=[f"Peak: ₹{maximum_revenue:,.0f}"],
-        textposition="top center",
-        marker=dict(color="#2ca02c", size=14, symbol="star")
-    ))
-
-    fig_trend.add_trace(go.Scatter(
-        x=[lowest_row["Date"]],
-        y=[minimum_revenue],
-        mode="markers+text",
-        name="Lowest Sales Day",
-        text=[f"Low: ₹{minimum_revenue:,.0f}"],
-        textposition="bottom center",
-        marker=dict(color="#d62728", size=12, symbol="triangle-down")
-    ))
-
-    fig_trend.update_layout(
-        title="Daily Revenue Over Time with Trendline",
-        xaxis_title="Date",
-        yaxis_title="Revenue (₹)",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        template="plotly_white",
-        height=480
-    )
-    st.plotly_chart(fig_trend, use_container_width=True)
+        fig_trend.update_layout(
+            xaxis_title="Date",
+            yaxis_title=f"{selected_metric_col} ({metric_symbol})" if metric_symbol else selected_metric_col,
+            hovermode="x unified" if slice_by_dim == "None" else "closest",
+            template="plotly_white",
+            height=460
+        )
+        st.plotly_chart(fig_trend, width="stretch")
 
 # ================= TAB 2: GROWTH & CUMULATIVE =================
-with tab2:
+with tabs[tab_idx]:
+    tab_idx += 1
     col_grow1, col_grow2 = st.columns(2)
 
     with col_grow1:
-        st.subheader("🚀 Cumulative Revenue Trajectory")
+        st.subheader("🚀 Cumulative Total Trajectory")
         fig_cum = px.area(
-            df,
-            x="Date",
-            y="Cumulative_Revenue",
-            title="Total Accumulated Revenue Over Time",
-            labels={"Cumulative_Revenue": "Running Total (₹)", "Date": "Date"},
+            daily_df,
+            x="Parsed_Date",
+            y="Cumulative_Total",
+            title=f"Total Accumulated {selected_metric_col} Over Time",
+            labels={"Cumulative_Total": f"Cumulative {selected_metric_col}", "Parsed_Date": "Date"},
             color_discrete_sequence=["#2b5c8f"]
         )
         fig_cum.update_traces(
-            hovertemplate="<b>Date:</b> %{x|%d %b %Y}<br><b>Accumulated:</b> ₹%{y:,.2f}<extra></extra>"
+            hovertemplate=f"<b>Date:</b> %{{x|%d %b %Y}}<br><b>Cumulative:</b> {metric_symbol}%{{y:,.2f}}<extra></extra>"
         )
         fig_cum.update_layout(template="plotly_white", height=420)
-        st.plotly_chart(fig_cum, use_container_width=True)
+        st.plotly_chart(fig_cum, width="stretch")
 
     with col_grow2:
-        st.subheader("⚡ Day-over-Day (DoD) % Revenue Change")
-        dod_df = df.dropna(subset=["DoD_Change_Pct"]).copy()
+        st.subheader("⚡ Day-over-Day (DoD) % Fluctuation")
+        dod_df = daily_df.dropna(subset=["DoD_Change_Pct"]).copy()
         dod_df["Color"] = dod_df["DoD_Change_Pct"].apply(lambda x: "Growth (Up)" if x >= 0 else "Decline (Down)")
 
         fig_dod = px.bar(
             dod_df,
-            x="Date",
+            x="Parsed_Date",
             y="DoD_Change_Pct",
             color="Color",
             color_discrete_map={"Growth (Up)": "#2ca02c", "Decline (Down)": "#d62728"},
-            title="Daily Percentage Fluctuation vs Previous Day",
-            labels={"DoD_Change_Pct": "DoD Change (%)", "Date": "Date"}
+            title="Daily % Growth vs Previous Day",
+            labels={"DoD_Change_Pct": "DoD Change (%)", "Parsed_Date": "Date"}
         )
         fig_dod.update_traces(
-            hovertemplate="<b>Date:</b> %{x|%d %b %Y}<br><b>DoD Growth:</b> %{y:+.2f}%<extra></extra>"
+            hovertemplate="<b>Date:</b> %{x|%d %b %Y}<br><b>DoD Change:</b> %{y:+.2f}%<extra></extra>"
         )
         fig_dod.update_layout(template="plotly_white", height=420, legend_title="")
-        st.plotly_chart(fig_dod, use_container_width=True)
+        st.plotly_chart(fig_dod, width="stretch")
 
 # ================= TAB 3: DAY-OF-WEEK & WEEKENDS =================
-with tab3:
+with tabs[tab_idx]:
+    tab_idx += 1
     col_dow1, col_dow2 = st.columns([1.6, 1.2])
 
     days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     dow_df = (
-        df.groupby("Day_Name")["Revenue"]
-        .agg(Average_Revenue="mean", Total_Revenue="sum", Order_Count="count")
+        daily_df.groupby("Day_Name")["Daily_Total"]
+        .agg(Average_Value="mean", Total_Value="sum", Day_Count="count")
         .reindex(days_order)
         .dropna()
         .reset_index()
     )
 
     with col_dow1:
-        st.subheader("📅 Average Revenue by Day of Week")
+        st.subheader("📅 Average Daily Sales by Day of Week")
         fig_dow = px.bar(
             dow_df,
             x="Day_Name",
-            y="Average_Revenue",
-            color="Average_Revenue",
+            y="Average_Value",
+            color="Average_Value",
             color_continuous_scale="Blues",
-            title="Staffing & Demand Guide (Avg Sales per Weekday)",
-            labels={"Average_Revenue": "Avg Revenue (₹)", "Day_Name": "Day of Week"}
+            title=f"Average {selected_metric_col} by Weekday",
+            labels={"Average_Value": f"Average ({metric_symbol})", "Day_Name": "Day"}
         )
         fig_dow.update_traces(
-            hovertemplate="<b>%{x}:</b> ₹%{y:,.2f}<extra></extra>"
+            hovertemplate=f"<b>%{{x}}:</b> {metric_symbol}%{{y:,.2f}}<extra></extra>"
         )
         fig_dow.update_layout(template="plotly_white", height=420)
-        st.plotly_chart(fig_dow, use_container_width=True)
+        st.plotly_chart(fig_dow, width="stretch")
 
     with col_dow2:
-        st.subheader("🍕 Weekend vs Weekday Revenue Share")
-        weekend_df = df.groupby("Is_Weekend")["Revenue"].sum().reset_index()
+        st.subheader("🍕 Weekend vs Weekday Contribution")
+        weekend_df = daily_df.groupby("Is_Weekend")["Daily_Total"].sum().reset_index()
 
         fig_pie = px.pie(
             weekend_df,
             names="Is_Weekend",
-            values="Revenue",
+            values="Daily_Total",
             hole=0.45,
             color="Is_Weekend",
             color_discrete_map={"Weekend": "#ff7f0e", "Weekday": "#1f77b4"},
-            title="Revenue Contribution Split"
+            title=f"Total {selected_metric_col} Share"
         )
         fig_pie.update_traces(
             textinfo="percent+label",
-            hovertemplate="<b>%{label}:</b> ₹%{value:,.2f} (%{percent})<extra></extra>"
+            hovertemplate=f"<b>%{{label}}:</b> {metric_symbol}%{{value:,.2f}} (%{{percent}})<extra></extra>"
         )
         fig_pie.update_layout(template="plotly_white", height=420)
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width="stretch")
 
-# ================= TAB 4: DISTRIBUTION & TIERS =================
-with tab4:
+# ================= TAB 4: CATEGORY BREAKDOWN (IF AVAILABLE) =================
+if categorical_cols:
+    with tabs[tab_idx]:
+        tab_idx += 1
+        st.subheader("🏷️ Dimensional Category Breakdown")
+        
+        target_cat = st.selectbox("Select Dimension to Analyze:", categorical_cols, index=0)
+        
+        cat_agg = (
+            df.groupby(target_cat)["Clean_Metric"]
+            .agg(Total="sum", Average="mean", Count="count")
+            .reset_index()
+            .sort_values("Total", ascending=False)
+        )
+
+        col_c1, col_c2 = st.columns([1.4, 1.0])
+        with col_c1:
+            fig_cat_bar = px.bar(
+                cat_agg,
+                x=target_cat,
+                y="Total",
+                color="Total",
+                color_continuous_scale="Viridis",
+                title=f"Total {selected_metric_col} by {target_cat}",
+                labels={"Total": f"Total {selected_metric_col}", target_cat: target_cat}
+            )
+            fig_cat_bar.update_traces(
+                hovertemplate=f"<b>%{{x}}:</b> {metric_symbol}%{{y:,.2f}}<extra></extra>"
+            )
+            fig_cat_bar.update_layout(template="plotly_white", height=420)
+            st.plotly_chart(fig_cat_bar, width="stretch")
+
+        with col_c2:
+            fig_cat_pie = px.pie(
+                cat_agg,
+                names=target_cat,
+                values="Total",
+                hole=0.4,
+                title=f"{target_cat} Share (%)"
+            )
+            fig_cat_pie.update_traces(
+                textinfo="percent+label",
+                hovertemplate=f"<b>%{{label}}:</b> {metric_symbol}%{{value:,.2f}} (%{{percent}})<extra></extra>"
+            )
+            fig_cat_pie.update_layout(template="plotly_white", height=420)
+            st.plotly_chart(fig_cat_pie, width="stretch")
+
+        st.write(f"### 📋 {target_cat} Summary Table")
+        st.dataframe(
+            cat_agg.style.format({
+                "Total": f"{metric_symbol}{{:,.2f}}",
+                "Average": f"{metric_symbol}{{:,.2f}}",
+                "Count": "{:,}"
+            }),
+            width="stretch"
+        )
+
+# ================= TAB 5: DISTRIBUTION & TIERS =================
+with tabs[tab_idx]:
+    tab_idx += 1
     col_dist1, col_dist2 = st.columns(2)
 
     with col_dist1:
-        st.subheader("📊 Daily Revenue Distribution & Frequency")
+        st.subheader(f"📊 Daily {selected_metric_col} Distribution")
         fig_hist = px.histogram(
-            df,
-            x="Revenue",
-            nbins=10,
+            daily_df,
+            x="Daily_Total",
+            nbins=12,
             marginal="box",
-            title="Histogram & Box Plot of Daily Sales",
-            labels={"Revenue": "Daily Revenue (₹)"},
+            title="Histogram & Box Plot (Daily Performance Density)",
+            labels={"Daily_Total": f"Daily {selected_metric_col}"},
             color_discrete_sequence=["#9467bd"]
         )
         fig_hist.update_layout(template="plotly_white", height=420)
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist, width="stretch")
 
     with col_dist2:
-        st.subheader("🏷️ Sales Performance Tiers")
+        st.subheader("🏷️ Performance Tiers")
         
-        # Categorize revenue into business tiers
-        def categorize_tier(rev):
-            if rev >= 20000:
-                return "🌟 High (> ₹20k)"
-            elif rev >= 13000:
-                return "⚡ Medium (₹13k - ₹20k)"
+        # Calculate dynamic quantile tiers
+        q33 = daily_df["Daily_Total"].quantile(0.33)
+        q66 = daily_df["Daily_Total"].quantile(0.66)
+        
+        def calculate_tier(val):
+            if val >= q66:
+                return f"🌟 High (≥ {metric_symbol}{q66:,.0f})"
+            elif val >= q33:
+                return f"⚡ Medium ({metric_symbol}{q33:,.0f} - {metric_symbol}{q66:,.0f})"
             else:
-                return "💤 Low (< ₹13k)"
+                return f"💤 Low (< {metric_symbol}{q33:,.0f})"
         
-        tier_df = df.copy()
-        tier_df["Tier"] = tier_df["Revenue"].apply(categorize_tier)
-        tier_counts = tier_df["Tier"].value_counts().reset_index()
+        tier_series = daily_df["Daily_Total"].apply(calculate_tier)
+        tier_counts = tier_series.value_counts().reset_index()
         tier_counts.columns = ["Tier", "Days_Count"]
 
         fig_tier = px.bar(
@@ -351,32 +523,33 @@ with tab4:
             y="Days_Count",
             color="Tier",
             color_discrete_sequence=px.colors.qualitative.Safe,
-            title="Number of Days in Each Revenue Bracket",
+            title="Days Count in Each Performance Bracket",
             labels={"Days_Count": "Number of Days"}
         )
         fig_tier.update_layout(template="plotly_white", height=420, showlegend=False)
-        st.plotly_chart(fig_tier, use_container_width=True)
+        st.plotly_chart(fig_tier, width="stretch")
 
-# ================= TAB 5: RAW DATA & EXPORT =================
-with tab5:
-    st.subheader("📋 Filtered Dataset with Analytics")
-    display_df = df[["Date", "Day_Name", "Is_Weekend", "Revenue", "Cumulative_Revenue", "DoD_Change_Pct"]].copy()
-    display_df["Date"] = display_df["Date"].dt.strftime("%Y-%m-%d")
+# ================= TAB 6: FILTERED DATA & EXPORT =================
+with tabs[tab_idx]:
+    tab_idx += 1
+    st.subheader("📋 Filtered Dataset with Derived Metrics")
     
+    # Format dates nicely for display
+    display_df = df.copy()
+    display_df[selected_date_col] = display_df["Parsed_Date"].dt.strftime("%Y-%m-%d")
+    # Drop internal helper columns from raw view
+    clean_display = display_df.drop(columns=["Parsed_Date", "Clean_Metric"], errors="ignore")
+
     st.dataframe(
-        display_df.style.format({
-            "Revenue": "₹{:,.2f}",
-            "Cumulative_Revenue": "₹{:,.2f}",
-            "DoD_Change_Pct": "{:+.2f}%"
-        }),
-        use_container_width=True
+        clean_display,
+        width="stretch"
     )
     
     # CSV Export Button
-    csv_data = display_df.to_csv(index=False).encode("utf-8")
+    csv_data = clean_display.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="⬇️ Download Analyzed Data as CSV",
+        label="⬇️ Download Filtered Data as CSV",
         data=csv_data,
-        file_name="retail_revenue_analyzed.csv",
+        file_name="retail_analytics_filtered.csv",
         mime="text/csv"
     )
