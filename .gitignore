@@ -1,0 +1,9 @@
+# Temporary files created by Code Runner
+tempCodeRunnerFile.*
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Python cache
+__pycache__/
+*.py[cod]
